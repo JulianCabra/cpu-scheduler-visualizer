@@ -1,4 +1,4 @@
-import { Process, SimulationResult, GanttEvent, Metrics, QueueState, Algorithm } from "@/types/simulator";
+import { Process, SimulationResult, GanttEvent, Metrics, QueueState, Algorithm, SimulationSnapshot, StepSimulationResult } from "@/types/simulator";
 
 const PROCESS_COLORS = [
   "var(--process-1)", "var(--process-2)", "var(--process-3)",
