@@ -44,3 +44,17 @@ export interface RandomConfig {
   burstMax: number;
   arrivalMax: number;
 }
+
+export interface SimulationSnapshot {
+  time: number;
+  gantt: GanttEvent[];
+  queues: QueueState[];
+  cpuProcess: number | null;
+  metrics: Metrics;
+}
+
+export interface StepSimulationResult {
+  algorithm: Algorithm;
+  snapshots: SimulationSnapshot[];
+  finalResult: SimulationResult;
+}
