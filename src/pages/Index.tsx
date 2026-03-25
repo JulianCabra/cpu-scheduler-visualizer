@@ -169,6 +169,15 @@ const Index = () => {
                   </button>
                 ))}
               </div>
+
+              {/* Compare metrics */}
+              <MetricsComparisonDialog
+                metrics={{
+                  SRTF: getCurrentSnapshot("SRTF")?.metrics ?? null,
+                  MLFQ: getCurrentSnapshot("MLFQ")?.metrics ?? null,
+                  VRR: getCurrentSnapshot("VRR")?.metrics ?? null,
+                }}
+              />
             </motion.div>
           )}
 
