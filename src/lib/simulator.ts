@@ -282,6 +282,283 @@ export function runSimulation(processes: Process[], algorithm: Algorithm): Simul
   }
 }
 
+function computeMetricsPartial(gantt: GanttEvent[], processes: Process[], completed: boolean[], remaining: number[], waitTime: number[], turnaround: number[], responseTime: number[], time: number): Metrics {
+  const n = processes.length;
+  const cpuTime = gantt.filter(g => g.type === "cpu").length;
+  const doneSoFar = completed.filter(Boolean).length;
+  return {
+    algorithm: "",
+    cpuUtilization: time > 0 ? (cpuTime / time) * 100 : 0,
+    throughput: time > 0 ? doneSoFar / time : 0,
+    avgWaitingTime: n > 0 ? waitTime.reduce((a, b) => a + b, 0) / n : 0,
+    avgTurnaroundTime: n > 0 ? turnaround.reduce((a, b) => a + b, 0) / n : 0,
+    avgResponseTime: n > 0 ? responseTime.filter(r => r >= 0).reduce((a, b) => a + b, 0) / Math.max(1, responseTime.filter(r => r >= 0).length) : 0,
+    fairnessIndex: computeFairness(waitTime),
+  };
+}
+
+function stepSRTF(processes: Process[]): StepSimulationResult {
+  const n = processes.length;
+  const remaining = processes.map(p => p.burst);
+  const completed = new Array(n).fill(false);
+  const waitTime = new Array(n).fill(0);
+  const turnaround = new Array(n).fill(0);
+  const responseTime = new Array(n).fill(-1);
+  const gantt: GanttEvent[] = [];
+  const snapshots: SimulationSnapshot[] = [];
+
+  let time = 0;
+  let done = 0;
+  const maxTime = processes.reduce((s, p) => s + p.arrival + p.burst + p.io_duration, 0) + 10;
+
+  while (done < n && time < maxTime) {
+    const available = processes
+      .map((p, i) => ({ ...p, idx: i }))
+      .filter(p => p.arrival <= time && !completed[p.idx] && remaining[p.idx] > 0);
+
+    if (available.length === 0) {
+      gantt.push({ pid: -1, start: time, end: time + 1, type: "idle" });
+      time++;
+      // snapshot
+      const readyProcs = processes.map((p, i) => ({ pid: p.id, remainingBurst: remaining[i], idx: i }))
+        .filter(item => !completed[item.idx] && item.remainingBurst > 0 && processes[item.idx].arrival <= time);
+      snapshots.push({
+        time,
+        gantt: mergeGantt([...gantt]),
+        queues: [{ queueIndex: 0, processes: readyProcs.map(({ pid, remainingBurst }) => ({ pid, remainingBurst })) }],
+        cpuProcess: null,
+        metrics: computeMetricsPartial(gantt, processes, completed, remaining, waitTime, turnaround, responseTime, time),
+      });
+      continue;
+    }
+
+    available.sort((a, b) => remaining[a.idx] - remaining[b.idx]);
+    const chosen = available[0];
+    const idx = chosen.idx;
+
+    if (responseTime[idx] === -1) responseTime[idx] = time - chosen.arrival;
+
+    gantt.push({ pid: chosen.id, start: time, end: time + 1, type: "cpu" });
+    remaining[idx]--;
+    time++;
+
+    if (remaining[idx] === 0) {
+      completed[idx] = true;
+      done++;
+      turnaround[idx] = time - chosen.arrival;
+      waitTime[idx] = turnaround[idx] - chosen.burst;
+    }
+
+    const readyProcs = processes.map((p, i) => ({ pid: p.id, remainingBurst: remaining[i], idx: i }))
+      .filter(item => !completed[item.idx] && item.remainingBurst > 0 && processes[item.idx].arrival <= time && item.pid !== chosen.id);
+    snapshots.push({
+      time,
+      gantt: mergeGantt([...gantt]),
+      queues: [{ queueIndex: 0, processes: readyProcs.map(({ pid, remainingBurst }) => ({ pid, remainingBurst })) }],
+      cpuProcess: chosen.id,
+      metrics: computeMetricsPartial(gantt, processes, completed, remaining, waitTime, turnaround, responseTime, time),
+    });
+  }
+
+  const finalResult = simulateSRTF(processes);
+  return { algorithm: "SRTF", snapshots, finalResult };
+}
+
+function stepMLFQ(processes: Process[]): StepSimulationResult {
+  const n = processes.length;
+  const quantums = [4, 8, 16];
+  const remaining = processes.map(p => p.burst);
+  const queueLevel = new Array(n).fill(0);
+  const completed = new Array(n).fill(false);
+  const waitTime = new Array(n).fill(0);
+  const turnaround = new Array(n).fill(0);
+  const responseTime = new Array(n).fill(-1);
+  const gantt: GanttEvent[] = [];
+  const snapshots: SimulationSnapshot[] = [];
+
+  let time = 0;
+  let done = 0;
+  const maxTime = processes.reduce((s, p) => s + p.arrival + p.burst, 0) + 20;
+
+  while (done < n && time < maxTime) {
+    let chosen = -1;
+    for (let q = 0; q < 3; q++) {
+      const available = processes
+        .map((p, i) => ({ ...p, idx: i }))
+        .filter(p => p.arrival <= time && !completed[p.idx] && remaining[p.idx] > 0 && queueLevel[p.idx] === q);
+      if (available.length > 0) {
+        chosen = available[0].idx;
+        break;
+      }
+    }
+
+    if (chosen === -1) {
+      gantt.push({ pid: -1, start: time, end: time + 1, type: "idle" });
+      time++;
+      const queues: QueueState[] = [0, 1, 2].map(q => ({
+        queueIndex: q,
+        processes: processes.map((p, i) => ({ pid: p.id, remainingBurst: remaining[i], idx: i }))
+          .filter(item => !completed[item.idx] && queueLevel[item.idx] === q && processes[item.idx].arrival <= time)
+          .map(({ pid, remainingBurst }) => ({ pid, remainingBurst })),
+      }));
+      snapshots.push({
+        time, gantt: mergeGantt([...gantt]), queues, cpuProcess: null,
+        metrics: computeMetricsPartial(gantt, processes, completed, remaining, waitTime, turnaround, responseTime, time),
+      });
+      continue;
+    }
+
+    if (responseTime[chosen] === -1) responseTime[chosen] = time - processes[chosen].arrival;
+
+    const q = queueLevel[chosen];
+    const quantum = quantums[q];
+    const execTime = Math.min(remaining[chosen], quantum);
+
+    for (let t = 0; t < execTime; t++) {
+      gantt.push({ pid: processes[chosen].id, start: time, end: time + 1, type: "cpu" });
+      remaining[chosen]--;
+      time++;
+
+      if (remaining[chosen] === 0) {
+        completed[chosen] = true;
+        done++;
+        turnaround[chosen] = time - processes[chosen].arrival;
+        waitTime[chosen] = turnaround[chosen] - processes[chosen].burst;
+      }
+
+      // Snapshot every tick
+      const queues: QueueState[] = [0, 1, 2].map(qIdx => ({
+        queueIndex: qIdx,
+        processes: processes.map((p, i) => ({ pid: p.id, remainingBurst: remaining[i], idx: i }))
+          .filter(item => !completed[item.idx] && queueLevel[item.idx] === qIdx && processes[item.idx].arrival <= time && item.idx !== chosen)
+          .map(({ pid, remainingBurst }) => ({ pid, remainingBurst })),
+      }));
+      snapshots.push({
+        time, gantt: mergeGantt([...gantt]), queues,
+        cpuProcess: completed[chosen] ? null : processes[chosen].id,
+        metrics: computeMetricsPartial(gantt, processes, completed, remaining, waitTime, turnaround, responseTime, time),
+      });
+
+      if (completed[chosen]) break;
+    }
+
+    if (!completed[chosen] && q < 2) {
+      queueLevel[chosen]++;
+    }
+  }
+
+  const finalResult = simulateMLFQ(processes);
+  return { algorithm: "MLFQ", snapshots, finalResult };
+}
+
+function stepVRR(processes: Process[]): StepSimulationResult {
+  const n = processes.length;
+  const quantum = 4;
+  const remaining = processes.map(p => p.burst);
+  const completed = new Array(n).fill(false);
+  const waitTime = new Array(n).fill(0);
+  const turnaround = new Array(n).fill(0);
+  const responseTime = new Array(n).fill(-1);
+  const gantt: GanttEvent[] = [];
+  const snapshots: SimulationSnapshot[] = [];
+
+  const readyQueue: number[] = [];
+  const auxQueue: number[] = [];
+  const creditMap = new Map<number, number>();
+
+  let time = 0;
+  let done = 0;
+  const sorted = processes.map((p, i) => ({ ...p, idx: i })).sort((a, b) => a.arrival - b.arrival);
+  let nextArrival = 0;
+  const maxTime = processes.reduce((s, p) => s + p.arrival + p.burst + p.io_duration, 0) + 20;
+
+  while (done < n && time < maxTime) {
+    while (nextArrival < sorted.length && sorted[nextArrival].arrival <= time) {
+      readyQueue.push(sorted[nextArrival].idx);
+      nextArrival++;
+    }
+
+    let chosen = -1;
+    let credit = quantum;
+
+    if (auxQueue.length > 0) {
+      chosen = auxQueue.shift()!;
+      credit = creditMap.get(chosen) || quantum;
+    } else if (readyQueue.length > 0) {
+      chosen = readyQueue.shift()!;
+    }
+
+    if (chosen === -1) {
+      gantt.push({ pid: -1, start: time, end: time + 1, type: "idle" });
+      time++;
+      const allReady = [...auxQueue, ...readyQueue].map(idx => ({
+        pid: processes[idx].id, remainingBurst: remaining[idx]
+      }));
+      snapshots.push({
+        time, gantt: mergeGantt([...gantt]),
+        queues: [{ queueIndex: 0, processes: allReady }],
+        cpuProcess: null,
+        metrics: computeMetricsPartial(gantt, processes, completed, remaining, waitTime, turnaround, responseTime, time),
+      });
+      continue;
+    }
+
+    if (responseTime[chosen] === -1) responseTime[chosen] = time - processes[chosen].arrival;
+
+    const execTime = Math.min(remaining[chosen], credit);
+    for (let t = 0; t < execTime; t++) {
+      gantt.push({ pid: processes[chosen].id, start: time, end: time + 1, type: "cpu" });
+      remaining[chosen]--;
+      time++;
+
+      while (nextArrival < sorted.length && sorted[nextArrival].arrival <= time) {
+        readyQueue.push(sorted[nextArrival].idx);
+        nextArrival++;
+      }
+
+      if (remaining[chosen] === 0) {
+        completed[chosen] = true;
+        done++;
+        turnaround[chosen] = time - processes[chosen].arrival;
+        waitTime[chosen] = turnaround[chosen] - processes[chosen].burst;
+      }
+
+      const allReady = [...auxQueue, ...readyQueue]
+        .filter(idx => !completed[idx])
+        .map(idx => ({ pid: processes[idx].id, remainingBurst: remaining[idx] }));
+      snapshots.push({
+        time, gantt: mergeGantt([...gantt]),
+        queues: [{ queueIndex: 0, processes: allReady }],
+        cpuProcess: completed[chosen] ? null : processes[chosen].id,
+        metrics: computeMetricsPartial(gantt, processes, completed, remaining, waitTime, turnaround, responseTime, time),
+      });
+
+      if (completed[chosen]) break;
+    }
+
+    if (!completed[chosen] && remaining[chosen] > 0) {
+      const leftover = quantum - execTime;
+      if (leftover > 0) {
+        creditMap.set(chosen, leftover);
+        auxQueue.push(chosen);
+      } else {
+        readyQueue.push(chosen);
+      }
+    }
+  }
+
+  const finalResult = simulateVRR(processes);
+  return { algorithm: "VRR", snapshots, finalResult };
+}
+
+export function runStepSimulation(processes: Process[], algorithm: Algorithm): StepSimulationResult {
+  switch (algorithm) {
+    case "SRTF": return stepSRTF(processes);
+    case "MLFQ": return stepMLFQ(processes);
+    case "VRR": return stepVRR(processes);
+  }
+}
+
 export function generateRandomProcesses(count: number, burstMin: number, burstMax: number, arrivalMax: number): Process[] {
   return Array.from({ length: count }, (_, i) => ({
     id: i + 1,
