@@ -6,6 +6,8 @@ import ProcessPanel from "@/components/ProcessPanel";
 import AlgorithmColumn from "@/components/AlgorithmColumn";
 import { Play, Pause, SkipForward, SkipBack, RotateCcw } from "lucide-react";
 import { motion } from "framer-motion";
+import MetricsComparisonDialog from "@/components/MetricsComparisonDialog";
+import { Metrics } from "@/types/simulator";
 
 const algorithms: Algorithm[] = ["SRTF", "MLFQ", "VRR"];
 
